@@ -24,9 +24,7 @@ function isProviderRateLimitError(
 
   return (
     message.includes("429") ||
-    message
-      .toLowerCase()
-      .includes("rate limited")
+    message.toLowerCase().includes("rate limited")
   );
 }
 
@@ -62,7 +60,7 @@ const worker = new Worker(
 
     /*
      * Idempotency:
-     * Never send an email twice if it is already marked SENT.
+     * Never send the same email again if it is already SENT.
      */
     if (emailRequest.status === "SENT") {
       console.log(
@@ -107,13 +105,9 @@ const worker = new Worker(
           latestSent.sentAt.getTime() +
           Number(delayBetweenEmails) * 1000;
 
-        if (
-          Date.now() <
-          nextAllowedTime
-        ) {
+        if (Date.now() < nextAllowedTime) {
           const delay =
-            nextAllowedTime -
-            Date.now();
+            nextAllowedTime - Date.now();
 
           console.log(
             `⏳ Minimum delay active for ${recipientEmail}. Rescheduling.`
@@ -197,8 +191,7 @@ const worker = new Worker(
               `email-${emailRequestId}-hour-${nextHourTimestamp}`,
             delay: Math.max(
               0,
-              nextHourTimestamp -
-                Date.now()
+              nextHourTimestamp - Date.now()
             ),
             attempts: 1,
             removeOnComplete: false,
@@ -249,15 +242,17 @@ const worker = new Worker(
         from: sender,
       });
 
-      const sentAt = new Date();
-
       /*
        * IMPORTANT:
        *
-       * Mark the email SENT immediately after SMTP succeeds.
-       * Elasticsearch must never be allowed to change a
-       * successfully sent email into FAILED.
+       * SMTP succeeded.
+       * Therefore the email is SENT.
+       *
+       * We update PostgreSQL BEFORE Elasticsearch.
+       * Elasticsearch can never change SENT into FAILED.
        */
+
+      const sentAt = new Date();
 
       const updatedEmail =
         await prisma.emailRequest.update({
@@ -281,14 +276,12 @@ const worker = new Worker(
        * Elasticsearch indexing
        * -------------------------------------------------------
        *
-       * Search indexing is non-critical.
-       * If Elasticsearch is unavailable, the email remains SENT.
+       * Elasticsearch is not part of email delivery.
+       * If Elasticsearch fails, the email MUST remain SENT.
        */
 
       try {
-        await indexEmail(
-          updatedEmail
-        );
+        await indexEmail(updatedEmail);
 
         console.log(
           `🔎 Email indexed successfully: ${emailRequestId}`
@@ -300,6 +293,10 @@ const worker = new Worker(
         );
       }
 
+      /*
+       * Very important:
+       * Do NOT throw after successful SMTP delivery.
+       */
       return;
     } catch (error) {
       const message =
@@ -308,15 +305,13 @@ const worker = new Worker(
           : "Unknown email error";
 
       /*
-       * ---------------------------------------------------------
+       * -------------------------------------------------------
        * SMTP provider rate limit
-       * ---------------------------------------------------------
+       * -------------------------------------------------------
        */
 
       if (
-        isProviderRateLimitError(
-          error
-        )
+        isProviderRateLimitError(error)
       ) {
         const retryDelay =
           5 * 60 * 1000;
@@ -355,9 +350,7 @@ const worker = new Worker(
             senderEmail: sender,
             errorMessage:
               "SMTP provider rate limited the request. Email rescheduled automatically.",
-            jobId: String(
-              retryJob.id
-            ),
+            jobId: String(retryJob.id),
           },
         });
 
@@ -369,9 +362,11 @@ const worker = new Worker(
       }
 
       /*
-       * ---------------------------------------------------------
+       * -------------------------------------------------------
        * Actual SMTP/application failure
-       * ---------------------------------------------------------
+       * -------------------------------------------------------
+       *
+       * This is a genuine email failure.
        */
 
       const failedEmail =
@@ -387,14 +382,12 @@ const worker = new Worker(
         });
 
       /*
-       * Elasticsearch failure must not mask the original
-       * email failure.
+       * Elasticsearch failure must NOT hide the
+       * original SMTP/application error.
        */
 
       try {
-        await indexEmail(
-          failedEmail
-        );
+        await indexEmail(failedEmail);
       } catch (indexError) {
         console.error(
           `⚠️ Failed email could not be indexed: ${emailRequestId}`,
