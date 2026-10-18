@@ -14,7 +14,9 @@ import {
 import { sendSlackNotification } from "../services/slack.service";
 import { indexEmail } from "../services/elasticsearch.service";
 
-function isProviderRateLimitError(error: unknown): boolean {
+function isProviderRateLimitError(
+  error: unknown
+): boolean {
   const message =
     error instanceof Error
       ? error.message
@@ -22,12 +24,15 @@ function isProviderRateLimitError(error: unknown): boolean {
 
   return (
     message.includes("429") ||
-    message.toLowerCase().includes("rate limited")
+    message
+      .toLowerCase()
+      .includes("rate limited")
   );
 }
 
 const worker = new Worker(
   "email-scheduler",
+
   async (job: Job) => {
     const {
       emailRequestId,
@@ -55,10 +60,15 @@ const worker = new Worker(
       );
     }
 
+    /*
+     * Idempotency:
+     * Never send an email twice if it is already marked SENT.
+     */
     if (emailRequest.status === "SENT") {
       console.log(
         `Email ${emailRequestId} already sent. Skipping.`
       );
+
       return;
     }
 
@@ -69,13 +79,16 @@ const worker = new Worker(
 
     if (!sender) {
       throw new Error(
-        "Sender email is required. Configure ETHEREAL_USER in backend/.env"
+        "Sender email is required. Configure ETHEREAL_USER in environment variables."
       );
     }
 
     /*
+     * ---------------------------------------------------------
      * Minimum delay between individual emails
+     * ---------------------------------------------------------
      */
+
     if (Number(delayBetweenEmails) > 0) {
       const latestSent =
         await prisma.emailRequest.findFirst({
@@ -94,12 +107,16 @@ const worker = new Worker(
           latestSent.sentAt.getTime() +
           Number(delayBetweenEmails) * 1000;
 
-        if (Date.now() < nextAllowedTime) {
+        if (
+          Date.now() <
+          nextAllowedTime
+        ) {
           const delay =
-            nextAllowedTime - Date.now();
+            nextAllowedTime -
+            Date.now();
 
           console.log(
-            `Minimum delay active for ${recipientEmail}. Rescheduling.`
+            `⏳ Minimum delay active for ${recipientEmail}. Rescheduling.`
           );
 
           const newJob =
@@ -107,7 +124,8 @@ const worker = new Worker(
               "send-email",
               job.data,
               {
-                jobId: `email-${emailRequestId}-delay-${nextAllowedTime}`,
+                jobId:
+                  `email-${emailRequestId}-delay-${nextAllowedTime}`,
                 delay,
                 attempts: 1,
                 removeOnComplete: false,
@@ -133,8 +151,11 @@ const worker = new Worker(
     }
 
     /*
+     * ---------------------------------------------------------
      * Redis-backed hourly rate limit
+     * ---------------------------------------------------------
      */
+
     const allowed =
       await tryConsumeRateLimit(
         sender,
@@ -149,7 +170,7 @@ const worker = new Worker(
         new Date(nextHourTimestamp);
 
       console.log(
-        `Hourly limit reached for ${sender}. Rescheduling ${emailRequestId}`
+        `⚠️ Hourly limit reached for ${sender}. Rescheduling ${emailRequestId}.`
       );
 
       await prisma.emailRequest.update({
@@ -172,10 +193,12 @@ const worker = new Worker(
           "send-email",
           job.data,
           {
-            jobId: `email-${emailRequestId}-hour-${nextHourTimestamp}`,
+            jobId:
+              `email-${emailRequestId}-hour-${nextHourTimestamp}`,
             delay: Math.max(
               0,
-              nextHourTimestamp - Date.now()
+              nextHourTimestamp -
+                Date.now()
             ),
             attempts: 1,
             removeOnComplete: false,
@@ -197,8 +220,11 @@ const worker = new Worker(
     }
 
     /*
-     * Mark as processing before contacting SMTP.
+     * ---------------------------------------------------------
+     * Mark email as PROCESSING
+     * ---------------------------------------------------------
      */
+
     await prisma.emailRequest.update({
       where: {
         id: emailRequestId,
@@ -209,6 +235,12 @@ const worker = new Worker(
       },
     });
 
+    /*
+     * ---------------------------------------------------------
+     * Send email
+     * ---------------------------------------------------------
+     */
+
     try {
       await sendEmail({
         to: recipientEmail,
@@ -218,6 +250,14 @@ const worker = new Worker(
       });
 
       const sentAt = new Date();
+
+      /*
+       * IMPORTANT:
+       *
+       * Mark the email SENT immediately after SMTP succeeds.
+       * Elasticsearch must never be allowed to change a
+       * successfully sent email into FAILED.
+       */
 
       const updatedEmail =
         await prisma.emailRequest.update({
@@ -232,11 +272,35 @@ const worker = new Worker(
           },
         });
 
-      await indexEmail(updatedEmail);
-
       console.log(
-        `✅ Email sent: ${recipientEmail} using ${sender}`
+        `✅ Email sent successfully: ${recipientEmail}`
       );
+
+      /*
+       * -------------------------------------------------------
+       * Elasticsearch indexing
+       * -------------------------------------------------------
+       *
+       * Search indexing is non-critical.
+       * If Elasticsearch is unavailable, the email remains SENT.
+       */
+
+      try {
+        await indexEmail(
+          updatedEmail
+        );
+
+        console.log(
+          `🔎 Email indexed successfully: ${emailRequestId}`
+        );
+      } catch (indexError) {
+        console.error(
+          `⚠️ Elasticsearch indexing failed for ${emailRequestId}. Email remains SENT.`,
+          indexError
+        );
+      }
+
+      return;
     } catch (error) {
       const message =
         error instanceof Error
@@ -244,16 +308,19 @@ const worker = new Worker(
           : "Unknown email error";
 
       /*
-       * Ethereal/provider throttling:
-       *
-       * Do NOT throw the error back to BullMQ.
-       * Instead, move the email back to SCHEDULED
-       * and create one controlled delayed job.
-       *
-       * This prevents a continuous 429 retry loop.
+       * ---------------------------------------------------------
+       * SMTP provider rate limit
+       * ---------------------------------------------------------
        */
-      if (isProviderRateLimitError(error)) {
-        const retryDelay = 5 * 60 * 1000;
+
+      if (
+        isProviderRateLimitError(
+          error
+        )
+      ) {
+        const retryDelay =
+          5 * 60 * 1000;
+
         const retryAt =
           Date.now() + retryDelay;
 
@@ -268,7 +335,8 @@ const worker = new Worker(
             "send-email",
             job.data,
             {
-              jobId: `email-${emailRequestId}-smtp-${retryAt}`,
+              jobId:
+                `email-${emailRequestId}-smtp-${retryAt}`,
               delay: retryDelay,
               attempts: 1,
               removeOnComplete: false,
@@ -282,26 +350,30 @@ const worker = new Worker(
           },
           data: {
             status: "SCHEDULED",
-            scheduledAt: new Date(retryAt),
+            scheduledAt:
+              new Date(retryAt),
             senderEmail: sender,
             errorMessage:
               "SMTP provider rate limited the request. Email rescheduled automatically.",
-            jobId: String(retryJob.id),
+            jobId: String(
+              retryJob.id
+            ),
           },
         });
 
         console.log(
-          `🔄 Email ${emailRequestId} rescheduled after SMTP 429`
+          `🔄 Email ${emailRequestId} rescheduled after SMTP rate limit.`
         );
 
         return;
       }
 
       /*
-       * Non-rate-limit SMTP/application error:
-       * mark the email as failed and let BullMQ
-       * handle the configured retry policy.
+       * ---------------------------------------------------------
+       * Actual SMTP/application failure
+       * ---------------------------------------------------------
        */
+
       const failedEmail =
         await prisma.emailRequest.update({
           where: {
@@ -314,16 +386,31 @@ const worker = new Worker(
           },
         });
 
-      await indexEmail(failedEmail);
+      /*
+       * Elasticsearch failure must not mask the original
+       * email failure.
+       */
+
+      try {
+        await indexEmail(
+          failedEmail
+        );
+      } catch (indexError) {
+        console.error(
+          `⚠️ Failed email could not be indexed: ${emailRequestId}`,
+          indexError
+        );
+      }
 
       console.error(
-        `Email job failed: ${emailRequestId}`,
+        `❌ Email job failed: ${emailRequestId}`,
         message
       );
 
       throw error;
     }
   },
+
   {
     connection: {
       host: env.REDIS_HOST,
@@ -331,32 +418,45 @@ const worker = new Worker(
     },
 
     concurrency:
-      Number(process.env.WORKER_CONCURRENCY) || 5,
+      Number(
+        process.env.WORKER_CONCURRENCY
+      ) || 5,
   }
 );
 
-worker.on("completed", (job) => {
-  console.log(
-    `✅ Job completed: ${job.id}`
-  );
-});
+worker.on(
+  "completed",
+  (job) => {
+    console.log(
+      `✅ Job completed: ${job.id}`
+    );
+  }
+);
 
-worker.on("failed", (job, error) => {
-  console.error(
-    `❌ Job failed: ${job?.id}`,
-    error.message
-  );
-});
+worker.on(
+  "failed",
+  (job, error) => {
+    console.error(
+      `❌ Job failed: ${job?.id}`,
+      error.message
+    );
+  }
+);
 
-worker.on("error", (error) => {
-  console.error(
-    "Worker error:",
-    error
-  );
-});
+worker.on(
+  "error",
+  (error) => {
+    console.error(
+      "❌ Worker error:",
+      error
+    );
+  }
+);
 
 console.log(
   `📧 Email worker started with concurrency ${
-    Number(process.env.WORKER_CONCURRENCY) || 5
+    Number(
+      process.env.WORKER_CONCURRENCY
+    ) || 5
   }`
 );
