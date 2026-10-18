@@ -1,17 +1,12 @@
 import { Request, Response } from "express";
-
 import prisma from "../config/database";
 import { AuthenticatedRequest } from "../middleware/auth.middleware";
-
 import {
   findOrCreateGoogleUser,
   generateAuthToken,
 } from "../services/auth.service";
 
-export async function googleCallback(
-  req: Request,
-  res: Response
-) {
+export async function googleCallback(req: Request, res: Response) {
   try {
     const googleUser = req.user as {
       googleId: string;
@@ -27,32 +22,25 @@ export async function googleCallback(
       });
     }
 
-    const user =
-      await findOrCreateGoogleUser(
-        googleUser
-      );
+    const user = await findOrCreateGoogleUser(googleUser);
 
-    const token =
-      generateAuthToken(user.id);
+    const token = generateAuthToken(user.id);
 
     const frontendUrl =
       process.env.FRONTEND_URL ||
-      "http://localhost:5173";
+      "https://reachinbox-email-scheduler-eta-topaz.vercel.app";
+
+    console.log("Google OAuth redirect:", frontendUrl);
 
     return res.redirect(
-      `${frontendUrl}/auth/callback?token=${encodeURIComponent(
-        token
-      )}`
+      `${frontendUrl}/auth/callback?token=${encodeURIComponent(token)}`
     );
   } catch (error) {
-    console.error(
-      "Google callback error:",
-      error
-    );
+    console.error("Google callback error:", error);
 
     const frontendUrl =
       process.env.FRONTEND_URL ||
-      "http://localhost:5173";
+      "https://reachinbox-email-scheduler-eta-topaz.vercel.app";
 
     return res.redirect(
       `${frontendUrl}/login?error=authentication_failed`
@@ -72,12 +60,9 @@ export async function getCurrentUser(
       });
     }
 
-    const user =
-      await prisma.user.findUnique({
-        where: {
-          id: req.userId,
-        },
-      });
+    const user = await prisma.user.findUnique({
+      where: { id: req.userId },
+    });
 
     if (!user) {
       return res.status(404).json({
@@ -96,10 +81,7 @@ export async function getCurrentUser(
       },
     });
   } catch (error) {
-    console.error(
-      "Get current user error:",
-      error
-    );
+    console.error("Get current user error:", error);
 
     return res.status(500).json({
       success: false,
@@ -108,10 +90,7 @@ export async function getCurrentUser(
   }
 }
 
-export async function logout(
-  _req: Request,
-  res: Response
-) {
+export async function logout(_req: Request, res: Response) {
   return res.status(200).json({
     success: true,
     message: "Logged out successfully",
