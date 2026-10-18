@@ -1,12 +1,13 @@
 import { Mail, ShieldCheck } from "lucide-react";
 
 const BACKEND_URL =
-  "http://localhost:5000";
+  import.meta.env.VITE_API_URL ||
+  "http://localhost:5000/api";
 
 function Login() {
   const handleGoogleLogin = () => {
     window.location.href =
-      `${BACKEND_URL}/api/auth/google`;
+      `${BACKEND_URL}/auth/google`;
   };
 
   return (
