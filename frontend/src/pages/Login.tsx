@@ -1,8 +1,10 @@
 import { Mail, ShieldCheck } from "lucide-react";
 
+// const BACKEND_URL =
+//   import.meta.env.VITE_API_URL ||
+//   "http://localhost:5000/api";
 const BACKEND_URL =
-  import.meta.env.VITE_API_URL ||
-  "http://localhost:5000/api";
+  "https://reachinbox-backend-8zvo.onrender.com/api";
 
 function Login() {
   const handleGoogleLogin = () => {
