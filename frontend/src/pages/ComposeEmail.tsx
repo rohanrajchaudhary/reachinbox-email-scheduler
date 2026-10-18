@@ -1,4 +1,3 @@
-// import { FormEvent, useState } from "react";
 import { useState } from "react";
 import type { FormEvent } from "react";
 import {
@@ -52,11 +51,22 @@ function ComposeEmail() {
 
       formData.append("subject", subject);
       formData.append("body", body);
-      formData.append("startTime", startTime);
+
+      // datetime-local gives the user's local time.
+      // Convert it to UTC before sending it to the backend.
+      const scheduledTime =
+        new Date(startTime).toISOString();
+
+      formData.append(
+        "startTime",
+        scheduledTime
+      );
+
       formData.append(
         "delayBetweenEmails",
         delay
       );
+
       formData.append(
         "hourlyLimit",
         hourlyLimit
@@ -73,7 +83,8 @@ function ComposeEmail() {
         formData,
         {
           headers: {
-            "Content-Type": "multipart/form-data",
+            "Content-Type":
+              "multipart/form-data",
           },
         }
       );
@@ -214,9 +225,11 @@ function ComposeEmail() {
 
             <div className="my-5 flex items-center gap-3">
               <div className="h-px flex-1 bg-slate-200" />
+
               <span className="text-xs text-slate-400">
                 OR
               </span>
+
               <div className="h-px flex-1 bg-slate-200" />
             </div>
 
