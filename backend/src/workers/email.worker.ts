@@ -12,7 +12,6 @@ import {
 } from "../services/rate-limit.service";
 
 import { sendSlackNotification } from "../services/slack.service";
-import { indexEmail } from "../services/elasticsearch.service";
 
 function isProviderRateLimitError(
   error: unknown
@@ -59,9 +58,13 @@ const worker = new Worker(
     }
 
     /*
-     * Idempotency:
-     * Never send the same email again if it is already SENT.
+     * ---------------------------------------------------------
+     * Idempotency
+     * ---------------------------------------------------------
+     *
+     * Never send the same email twice if it is already SENT.
      */
+
     if (emailRequest.status === "SENT") {
       console.log(
         `Email ${emailRequestId} already sent. Skipping.`
@@ -243,60 +246,47 @@ const worker = new Worker(
       });
 
       /*
-       * IMPORTANT:
+       * -------------------------------------------------------
+       * IMPORTANT
+       * -------------------------------------------------------
        *
-       * SMTP succeeded.
+       * SMTP send succeeded.
+       *
        * Therefore the email is SENT.
        *
-       * We update PostgreSQL BEFORE Elasticsearch.
-       * Elasticsearch can never change SENT into FAILED.
+       * We immediately save SENT in PostgreSQL.
+       *
+       * Elasticsearch is NOT called here.
+       * Elasticsearch cannot make a successfully sent
+       * email become FAILED.
        */
 
       const sentAt = new Date();
 
-      const updatedEmail =
-        await prisma.emailRequest.update({
-          where: {
-            id: emailRequestId,
-          },
-          data: {
-            status: "SENT",
-            sentAt,
-            senderEmail: sender,
-            errorMessage: null,
-          },
-        });
+      await prisma.emailRequest.update({
+        where: {
+          id: emailRequestId,
+        },
+        data: {
+          status: "SENT",
+          sentAt,
+          senderEmail: sender,
+          errorMessage: null,
+        },
+      });
 
       console.log(
         `✅ Email sent successfully: ${recipientEmail}`
       );
 
       /*
-       * -------------------------------------------------------
-       * Elasticsearch indexing
-       * -------------------------------------------------------
-       *
-       * Elasticsearch is not part of email delivery.
-       * If Elasticsearch fails, the email MUST remain SENT.
-       */
-
-      try {
-        await indexEmail(updatedEmail);
-
-        console.log(
-          `🔎 Email indexed successfully: ${emailRequestId}`
-        );
-      } catch (indexError) {
-        console.error(
-          `⚠️ Elasticsearch indexing failed for ${emailRequestId}. Email remains SENT.`,
-          indexError
-        );
-      }
-
-      /*
        * Very important:
-       * Do NOT throw after successful SMTP delivery.
+       *
+       * Do NOT throw anything after successful SMTP delivery.
+       *
+       * This makes sure BullMQ marks the job as completed.
        */
+
       return;
     } catch (error) {
       const message =
@@ -363,42 +353,32 @@ const worker = new Worker(
 
       /*
        * -------------------------------------------------------
-       * Actual SMTP/application failure
+       * Actual SMTP / application failure
        * -------------------------------------------------------
        *
-       * This is a genuine email failure.
+       * Only a genuine email sending error reaches here.
        */
 
-      const failedEmail =
-        await prisma.emailRequest.update({
-          where: {
-            id: emailRequestId,
-          },
-          data: {
-            status: "FAILED",
-            errorMessage: message,
-            senderEmail: sender,
-          },
-        });
-
-      /*
-       * Elasticsearch failure must NOT hide the
-       * original SMTP/application error.
-       */
-
-      try {
-        await indexEmail(failedEmail);
-      } catch (indexError) {
-        console.error(
-          `⚠️ Failed email could not be indexed: ${emailRequestId}`,
-          indexError
-        );
-      }
+      await prisma.emailRequest.update({
+        where: {
+          id: emailRequestId,
+        },
+        data: {
+          status: "FAILED",
+          errorMessage: message,
+          senderEmail: sender,
+        },
+      });
 
       console.error(
         `❌ Email job failed: ${emailRequestId}`,
         message
       );
+
+      /*
+       * Throw the original error so BullMQ knows that
+       * this was a genuine failed email job.
+       */
 
       throw error;
     }
@@ -416,6 +396,12 @@ const worker = new Worker(
       ) || 5,
   }
 );
+
+/*
+ * -----------------------------------------------------------
+ * BullMQ events
+ * -----------------------------------------------------------
+ */
 
 worker.on(
   "completed",
