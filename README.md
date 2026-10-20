@@ -67,6 +67,54 @@ The application allows authenticated users to upload recipient lists, schedule e
 - Safe behavior when Slack is not connected
 - Slack can be connected/reconnected without redeploying the application
 
+## Deployment & SMTP Limitation
+
+The application is deployed using:
+
+- Frontend: Vercel
+- Backend: Render Web Service
+- Database: PostgreSQL
+- Queue: Redis + BullMQ
+
+### Ethereal SMTP
+
+This project uses Ethereal SMTP as required by the assignment.
+
+The email service is configured using Nodemailer:
+
+- SMTP Host: `smtp.ethereal.email`
+- SMTP Port: `587`
+- Authentication: Ethereal SMTP credentials
+
+The Ethereal SMTP integration works correctly in the local development environment.
+
+### Render Free SMTP Limitation
+
+The deployed backend currently runs on Render's Free Web Service plan.
+
+Render Free Web Services block outbound network traffic on SMTP ports `25`, `465`, and `587`. Therefore, direct SMTP delivery through Ethereal from the deployed Free Render instance results in a connection timeout.
+
+This is a platform-level limitation of the Render Free compute plan and is not an application-level SMTP implementation error.
+
+Reference:
+https://render.com/docs/free
+
+For environments where outbound SMTP traffic is permitted, the same backend can send emails through the configured Ethereal SMTP server without requiring application code changes.
+
+### Local Email Testing
+
+To test the complete email delivery flow locally:
+
+1. Start PostgreSQL, Redis and Elasticsearch.
+2. Configure the Ethereal SMTP credentials in `backend/.env`.
+3. Start the backend and email worker.
+4. Schedule an email from the frontend.
+5. BullMQ processes the delayed job.
+6. Nodemailer sends the email through Ethereal SMTP.
+7. The email can be inspected through the Ethereal test inbox/preview.
+
+This allows the complete SMTP delivery workflow to be tested independently of Render's Free-plan SMTP restriction.
+
 ---
 
 # Architecture
